@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 type DownloadFormat = "mp4" | "mp3";
+type DownloadResolution = "best" | "2160" | "1440" | "1080" | "720" | "480" | "360";
 type DownloadStatus = "queued" | "starting" | "downloading" | "completed" | "failed";
 
 type QueueItem = {
@@ -12,6 +13,8 @@ type QueueItem = {
   author: string;
   duration: string;
   thumbnail: string;
+  format: DownloadFormat;
+  resolution: DownloadResolution;
   status: DownloadStatus;
   percent: number;
   speed: string;
@@ -19,6 +22,16 @@ type QueueItem = {
   filePath?: string;
   error?: string;
 };
+
+const RESOLUTION_OPTIONS: DownloadResolution[] = [
+  "best",
+  "2160",
+  "1440",
+  "1080",
+  "720",
+  "480",
+  "360",
+];
 
 function statusLabel(status: DownloadStatus): string {
   if (status === "queued") return "Queued";
@@ -28,16 +41,28 @@ function statusLabel(status: DownloadStatus): string {
   return "Failed";
 }
 
+function formatResolution(value: DownloadResolution): string {
+  return value === "best" ? "Best Available" : `${value}p`;
+}
+
 function App() {
   const [url, setUrl] = useState("");
   const [outputDir, setOutputDir] = useState("");
   const [format, setFormat] = useState<DownloadFormat>("mp4");
+  const [resolution, setResolution] = useState<DownloadResolution>("best");
   const [status, setStatus] = useState("Ready");
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [processing, setProcessing] = useState(false);
+  const [isMaximized, setIsMaximized] = useState(false);
+  const [supportedResolutions, setSupportedResolutions] = useState<DownloadResolution[]>(RESOLUTION_OPTIONS);
 
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onDownloadProgress((update) => {
+    window.electronAPI.isWindowMaximized().then(setIsMaximized).catch(() => undefined);
+    const unsubscribeMax = window.electronAPI.onWindowMaximized((value) => {
+      setIsMaximized(value);
+    });
+
+    const unsubscribeProgress = window.electronAPI.onDownloadProgress((update) => {
       setQueue((prev) =>
         prev.map((item) =>
           item.id === update.id
@@ -56,7 +81,8 @@ function App() {
     });
 
     return () => {
-      unsubscribe();
+      unsubscribeMax();
+      unsubscribeProgress();
     };
   }, []);
 
@@ -64,7 +90,6 @@ function App() {
     () => queue.filter((item) => item.status === "queued").length,
     [queue]
   );
-
   const downloadCount = useMemo(
     () => queue.filter((item) => item.status === "downloading" || item.status === "starting").length,
     [queue]
@@ -87,7 +112,19 @@ function App() {
     try {
       setStatus("Fetching video info...");
       const info = await window.electronAPI.getVideoInfo(trimmed);
+      const available = info.resolutions
+        .filter((v) => RESOLUTION_OPTIONS.includes(v as DownloadResolution))
+        .map((v) => v as DownloadResolution);
+      if (available.length > 0) {
+        setSupportedResolutions(["best", ...available.filter((v) => v !== "best")]);
+      } else {
+        setSupportedResolutions(RESOLUTION_OPTIONS);
+      }
+
       const itemId = `${info.id}-${Date.now()}`;
+      const queuedResolution: DownloadResolution =
+        format === "mp3" ? "best" : resolution;
+
       const newItem: QueueItem = {
         id: itemId,
         videoId: info.id,
@@ -96,6 +133,8 @@ function App() {
         author: info.author,
         duration: info.duration,
         thumbnail: info.thumbnail,
+        format,
+        resolution: queuedResolution,
         status: "queued",
         percent: 0,
         speed: "-",
@@ -115,7 +154,6 @@ function App() {
     if (processing) {
       return;
     }
-
     const pending = queue.filter((item) => item.status === "queued" || item.status === "failed");
     if (pending.length === 0) {
       setStatus("Queue is empty.");
@@ -138,7 +176,8 @@ function App() {
             id: item.id,
             url: item.url,
             outputDir: outputDir || undefined,
-            format,
+            format: item.format,
+            resolution: item.resolution,
             title: item.title,
           });
 
@@ -165,25 +204,32 @@ function App() {
     }
   };
 
-  const clearFinished = () => {
-    setQueue((prev) => prev.filter((item) => item.status !== "completed"));
-    setStatus("Cleared completed downloads.");
-  };
-
   return (
     <main className="app-shell">
       <section className="panel">
+        <header className="window-bar app-drag">
+          <span className="window-title">TDownloader</span>
+          <div className="window-controls no-drag">
+            <button type="button" onClick={() => window.electronAPI.minimizeWindow()}>
+              -
+            </button>
+            <button type="button" onClick={() => window.electronAPI.toggleMaximizeWindow()}>
+              {isMaximized ? "[] " : "[ ]"}
+            </button>
+            <button type="button" className="danger" onClick={() => window.electronAPI.closeWindow()}>
+              X
+            </button>
+          </div>
+        </header>
+
         <header className="panel-head">
           <div>
             <h1>TDownloader</h1>
-            <p>Electron desktop YouTube downloader with queue + progress tracking</p>
+            <p>Queue-based YouTube desktop downloader with progress tracking</p>
           </div>
           <div className="header-actions">
             <button type="button" onClick={startQueue} disabled={processing || queuedCount === 0}>
               {processing ? "Working..." : "Start Queue"}
-            </button>
-            <button type="button" className="ghost" onClick={clearFinished}>
-              Clear Completed
             </button>
           </div>
         </header>
@@ -215,6 +261,21 @@ function App() {
               >
                 <option value="mp4">MP4 (video)</option>
                 <option value="mp3">MP3 (audio)</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="resolution">Resolution</label>
+              <select
+                id="resolution"
+                value={resolution}
+                onChange={(event) => setResolution(event.target.value as DownloadResolution)}
+                disabled={processing || format === "mp3"}
+              >
+                {supportedResolutions.map((res) => (
+                  <option key={res} value={res}>
+                    {formatResolution(res)}
+                  </option>
+                ))}
               </select>
             </div>
             <div>
@@ -262,7 +323,8 @@ function App() {
                   <span className={`pill ${item.status}`}>{statusLabel(item.status)}</span>
                 </div>
                 <p>
-                  {item.author} • {item.duration}
+                  {item.author} - {item.duration} - {item.format.toUpperCase()} -{" "}
+                  {item.format === "mp3" ? "Audio" : formatResolution(item.resolution)}
                 </p>
                 <div className="meter">
                   <div className="bar" style={{ width: `${Math.max(0, Math.min(100, item.percent))}%` }} />

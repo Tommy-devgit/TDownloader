@@ -27,12 +27,10 @@ function findFirstExisting(paths) {
 }
 
 function getIconPath() {
-  const candidates = [
+  return findFirstExisting([
     path.join(__dirname, "..", "assets", "icon.png"),
     path.join(__dirname, "..", "assets", "icon.ico"),
-    path.join(__dirname, "..", "public", "vite.svg"),
-  ];
-  return findFirstExisting(candidates);
+  ]);
 }
 
 function resolveExecutable(name) {
@@ -47,6 +45,15 @@ function resolveExecutable(name) {
     "Packages",
     "yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
   );
+  const ytdlpRoot = path.join(
+    home,
+    "AppData",
+    "Local",
+    "Microsoft",
+    "WinGet",
+    "Packages",
+    "yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe"
+  );
 
   let ffmpegBin = null;
   if (fs.existsSync(ffmpegRoot)) {
@@ -60,6 +67,7 @@ function resolveExecutable(name) {
   const fallbackDirs = [
     path.join(home, "AppData", "Local", "Programs", "TDownloaderTools"),
     ffmpegBin,
+    ytdlpRoot,
   ];
 
   const candidates = [...pathEntries, ...fallbackDirs].filter(Boolean);
@@ -73,6 +81,31 @@ function resolveExecutable(name) {
   return name;
 }
 
+function setProgress(percent) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (typeof percent === "number") {
+    mainWindow.setProgressBar(percent / 100);
+  } else {
+    mainWindow.setProgressBar(-1);
+  }
+}
+
+function sendProgress(webContents, payload) {
+  if (!webContents || webContents.isDestroyed()) {
+    return;
+  }
+  webContents.send("download:progress", payload);
+}
+
+function sendMaximizeState() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send("window:maximized", mainWindow.isMaximized());
+}
+
 function createTray() {
   const iconPath = getIconPath();
   if (!iconPath) {
@@ -83,7 +116,6 @@ function createTray() {
   if (trayIcon.isEmpty()) {
     return;
   }
-
   trayIcon = trayIcon.resize({ width: 18, height: 18 });
   tray = new Tray(trayIcon);
   tray.setToolTip("TDownloader");
@@ -103,19 +135,10 @@ function createTray() {
       { role: "quit", label: "Quit" },
     ])
   );
-
-  tray.on("double-click", () => {
-    if (!mainWindow) {
-      return;
-    }
-    mainWindow.show();
-    mainWindow.focus();
-  });
 }
 
 function createWindow() {
   const iconPath = getIconPath();
-
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 780,
@@ -124,6 +147,7 @@ function createWindow() {
     show: false,
     backgroundColor: "#0d1014",
     title: "TDownloader",
+    frame: false,
     icon: iconPath || undefined,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -133,18 +157,21 @@ function createWindow() {
     },
   });
 
+  mainWindow.on("maximize", sendMaximizeState);
+  mainWindow.on("unmaximize", sendMaximizeState);
+
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
+    sendMaximizeState();
   });
 
   if (isDev) {
-    // Hot-reload Electron process files during development.
     try {
       require("electron-reload")(path.join(__dirname, ".."), {
         hardResetMethod: "exit",
       });
     } catch {
-      // Best-effort in development only.
+      // no-op in dev when not available
     }
     mainWindow.loadURL("http://localhost:5173");
   } else {
@@ -164,149 +191,132 @@ function formatDuration(secondsText) {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = Math.floor(totalSeconds % 60);
-
   const hh = String(hours).padStart(2, "0");
   const mm = String(minutes).padStart(2, "0");
   const ss = String(seconds).padStart(2, "0");
-
   return hours > 0 ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
-function sendProgress(webContents, payload) {
-  if (!webContents || webContents.isDestroyed()) {
-    return;
+function parseYtDlpProgress(line) {
+  const match = line.match(/^download:([^|]+)\|([^|]+)\|(.+)$/);
+  if (!match) {
+    return null;
   }
-  webContents.send("download:progress", payload);
-}
-
-async function downloadMp4({
-  stream,
-  targetPath,
-  sender,
-  id,
-  title,
-  outputDir,
-}) {
-  await new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(targetPath);
-
-    stream.on("progress", (_, downloaded, total) => {
-      const percent = total > 0 ? (downloaded / total) * 100 : 0;
-      sendProgress(sender, {
-        id,
-        title,
-        status: "downloading",
-        percent: Number(percent.toFixed(2)),
-        speed: "-",
-        eta: "-",
-      });
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setProgressBar(percent / 100);
-      }
-    });
-
-    stream.on("error", reject);
-    file.on("error", reject);
-    file.on("finish", resolve);
-
-    stream.pipe(file);
-  });
-
-  sendProgress(sender, {
-    id,
-    title,
-    status: "completed",
-    percent: 100,
-    speed: "done",
-    eta: "0s",
-    filePath: targetPath,
-  });
-
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setProgressBar(-1);
-  }
-
+  const rawPercent = match[1].trim().replace("%", "").trim();
+  const percent = Number(rawPercent);
   return {
-    success: true,
-    filePath: targetPath,
-    outputDir,
-    message: "Download completed.",
+    percent: Number.isFinite(percent) ? Number(percent.toFixed(2)) : 0,
+    speed: match[2].trim(),
+    eta: match[3].trim(),
   };
 }
 
-async function downloadMp3({
-  stream,
-  targetPath,
+function buildYtdlpArgs({ url, format, resolution, outputPath, ffmpegPath }) {
+  if (format === "mp3") {
+    return [
+      "-x",
+      "--audio-format",
+      "mp3",
+      "--audio-quality",
+      "0",
+      "--ffmpeg-location",
+      path.dirname(ffmpegPath),
+      "--newline",
+      "--progress-template",
+      "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+      "-o",
+      outputPath,
+      "--no-playlist",
+      url,
+    ];
+  }
+
+  const resFilter = resolution && resolution !== "best" ? `[height<=${resolution}]` : "";
+  const formatSelector =
+    resolution && resolution !== "best"
+      ? `bestvideo${resFilter}+bestaudio/best${resFilter}/best`
+      : "bestvideo+bestaudio/best";
+
+  return [
+    "-f",
+    formatSelector,
+    "--merge-output-format",
+    "mp4",
+    "--ffmpeg-location",
+    path.dirname(ffmpegPath),
+    "--newline",
+    "--progress-template",
+    "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+    "-o",
+    outputPath,
+    "--no-playlist",
+    url,
+  ];
+}
+
+async function downloadWithYtDlp({
   sender,
   id,
   title,
+  url,
+  format,
+  resolution,
+  outputPath,
   outputDir,
 }) {
+  const ytdlpPath = resolveExecutable("yt-dlp.exe");
   const ffmpegPath = resolveExecutable("ffmpeg.exe");
+  const args = buildYtdlpArgs({
+    url,
+    format,
+    resolution,
+    outputPath,
+    ffmpegPath,
+  });
 
   await new Promise((resolve, reject) => {
-    const ffmpeg = spawn(
-      ffmpegPath,
-      [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        "pipe:0",
-        "-vn",
-        "-codec:a",
-        "libmp3lame",
-        "-q:a",
-        "2",
-        "-y",
-        targetPath,
-      ],
-      {
-        windowsHide: true,
-        stdio: ["pipe", "ignore", "pipe"],
-      }
-    );
+    const proc = spawn(ytdlpPath, args, {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
-    stream.on("progress", (_, downloaded, total) => {
-      const percent = total > 0 ? (downloaded / total) * 100 : 0;
-      sendProgress(sender, {
-        id,
-        title,
-        status: "downloading",
-        percent: Number(percent.toFixed(2)),
-        speed: "converting",
-        eta: "-",
-      });
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setProgressBar(percent / 100);
+    let stderr = "";
+    proc.stdout.on("data", (chunk) => {
+      const lines = chunk.toString().split(/\r?\n/);
+      for (const line of lines) {
+        const parsed = parseYtDlpProgress(line.trim());
+        if (!parsed) {
+          continue;
+        }
+        sendProgress(sender, {
+          id,
+          title,
+          status: "downloading",
+          percent: parsed.percent,
+          speed: parsed.speed,
+          eta: parsed.eta,
+        });
+        setProgress(parsed.percent);
       }
     });
 
-    let errorText = "";
-    ffmpeg.stderr.on("data", (chunk) => {
-      errorText += chunk.toString();
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
     });
 
-    ffmpeg.on("error", (err) => {
-      reject(
-        new Error(
-          `Failed to start ffmpeg (${ffmpegPath}). ${err.message}`
-        )
-      );
+    proc.on("error", (err) => {
+      reject(new Error(`Failed to start yt-dlp: ${err.message}`));
     });
-
-    ffmpeg.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(errorText.trim() || `ffmpeg exited with code ${code}`));
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve();
         return;
       }
-      resolve();
+      reject(new Error(stderr.trim() || `yt-dlp exited with code ${code}`));
     });
-
-    stream.on("error", reject);
-    stream.pipe(ffmpeg.stdin);
   });
 
+  setProgress();
   sendProgress(sender, {
     id,
     title,
@@ -314,12 +324,141 @@ async function downloadMp3({
     percent: 100,
     speed: "done",
     eta: "0s",
-    filePath: targetPath,
+    filePath: outputPath,
   });
 
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setProgressBar(-1);
+  return {
+    success: true,
+    filePath: outputPath,
+    outputDir,
+    message: "Download completed.",
+  };
+}
+
+function selectProgressiveFormat(formats, resolution) {
+  const progressive = formats
+    .filter((f) => f.hasVideo && f.hasAudio && f.container === "mp4")
+    .sort((a, b) => (b.height || 0) - (a.height || 0));
+
+  if (progressive.length === 0) {
+    return null;
   }
+
+  if (!resolution || resolution === "best") {
+    return progressive[0];
+  }
+
+  const cap = Number(resolution);
+  if (!Number.isFinite(cap)) {
+    return progressive[0];
+  }
+
+  return progressive.find((f) => (f.height || 0) <= cap) || progressive[0];
+}
+
+async function downloadWithYtdlCore({
+  sender,
+  id,
+  info,
+  format,
+  resolution,
+  targetPath,
+  outputDir,
+}) {
+  const details = info.videoDetails;
+  const streamOptions =
+    format === "mp3"
+      ? { quality: "highestaudio", filter: "audioonly" }
+      : (() => {
+          const fmt = selectProgressiveFormat(info.formats, resolution);
+          if (!fmt) {
+            throw new Error("No progressive MP4 format available for this video.");
+          }
+          return { quality: fmt.itag };
+        })();
+
+  const stream = ytdl.downloadFromInfo(info, streamOptions);
+
+  if (format === "mp4") {
+    await new Promise((resolve, reject) => {
+      const file = fs.createWriteStream(targetPath);
+      stream.on("progress", (_, downloaded, total) => {
+        const percent = total > 0 ? Number(((downloaded / total) * 100).toFixed(2)) : 0;
+        sendProgress(sender, {
+          id,
+          title: details.title,
+          status: "downloading",
+          percent,
+          speed: "-",
+          eta: "-",
+        });
+        setProgress(percent);
+      });
+      stream.on("error", reject);
+      file.on("error", reject);
+      file.on("finish", resolve);
+      stream.pipe(file);
+    });
+  } else {
+    const ffmpegPath = resolveExecutable("ffmpeg.exe");
+    await new Promise((resolve, reject) => {
+      const ffmpeg = spawn(
+        ffmpegPath,
+        [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-i",
+          "pipe:0",
+          "-vn",
+          "-codec:a",
+          "libmp3lame",
+          "-q:a",
+          "2",
+          "-y",
+          targetPath,
+        ],
+        { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] }
+      );
+      let errorText = "";
+      ffmpeg.stderr.on("data", (chunk) => {
+        errorText += chunk.toString();
+      });
+      stream.on("progress", (_, downloaded, total) => {
+        const percent = total > 0 ? Number(((downloaded / total) * 100).toFixed(2)) : 0;
+        sendProgress(sender, {
+          id,
+          title: details.title,
+          status: "downloading",
+          percent,
+          speed: "converting",
+          eta: "-",
+        });
+        setProgress(percent);
+      });
+      stream.on("error", reject);
+      ffmpeg.on("error", reject);
+      ffmpeg.on("close", (code) => {
+        if (code !== 0) {
+          reject(new Error(errorText.trim() || `ffmpeg exited with code ${code}`));
+          return;
+        }
+        resolve();
+      });
+      stream.pipe(ffmpeg.stdin);
+    });
+  }
+
+  setProgress();
+  sendProgress(sender, {
+    id,
+    title: details.title,
+    status: "completed",
+    percent: 100,
+    speed: "done",
+    eta: "0s",
+    filePath: targetPath,
+  });
 
   return {
     success: true,
@@ -328,16 +467,57 @@ async function downloadMp3({
     message: "Download completed.",
   };
 }
+
+function shouldFallbackToYtDlp(error) {
+  if (!error || !(error instanceof Error)) {
+    return false;
+  }
+  const msg = error.message || "";
+  return (
+    msg.includes("Could not extract functions") ||
+    msg.includes("Could not extract decipher") ||
+    msg.includes("No n transform function")
+  );
+}
+
+ipcMain.handle("window:minimize", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.minimize();
+  }
+});
+
+ipcMain.handle("window:toggleMaximize", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize();
+  } else {
+    mainWindow.maximize();
+  }
+  return mainWindow.isMaximized();
+});
+
+ipcMain.handle("window:close", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close();
+  }
+});
+
+ipcMain.handle("window:isMaximized", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+  return mainWindow.isMaximized();
+});
 
 ipcMain.handle("dialog:chooseOutputFolder", async () => {
   const result = await dialog.showOpenDialog({
     properties: ["openDirectory", "createDirectory"],
   });
-
   if (result.canceled || result.filePaths.length === 0) {
     return null;
   }
-
   return result.filePaths[0];
 });
 
@@ -352,6 +532,17 @@ ipcMain.handle("video:getInfo", async (_, url) => {
     details.thumbnails && details.thumbnails.length > 0
       ? details.thumbnails[details.thumbnails.length - 1].url
       : "";
+  const resolutions = Array.from(
+    new Set(
+      info.formats
+        .filter((f) => f.hasVideo && f.hasAudio && f.height)
+        .map((f) => String(f.height))
+    )
+  )
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => b - a)
+    .map((v) => String(v));
 
   return {
     id: details.videoId,
@@ -360,11 +551,12 @@ ipcMain.handle("video:getInfo", async (_, url) => {
     duration: formatDuration(details.lengthSeconds),
     thumbnail: thumb,
     url: details.video_url || url,
+    resolutions,
   };
 });
 
 ipcMain.handle("download:start", async (event, payload) => {
-  const { id, url, outputDir, format, title } = payload || {};
+  const { id, url, outputDir, format, title, resolution } = payload || {};
   if (!id || typeof id !== "string") {
     throw new Error("Download ID is required.");
   }
@@ -375,61 +567,54 @@ ipcMain.handle("download:start", async (event, payload) => {
   const output = outputDir || app.getPath("downloads");
   await fs.promises.mkdir(output, { recursive: true });
 
-  const info = await ytdl.getInfo(url);
-  const details = info.videoDetails;
-  const safeBaseName = sanitizeFileName(title || details.title || id);
+  const safeBaseName = sanitizeFileName(title || id);
   const extension = format === "mp3" ? "mp3" : "mp4";
   const targetPath = path.join(output, `${safeBaseName}-${Date.now()}.${extension}`);
 
   sendProgress(event.sender, {
     id,
-    title: details.title,
+    title: title || "Download",
     status: "starting",
     percent: 0,
     speed: "-",
     eta: "-",
   });
 
-  const streamOptions =
-    format === "mp3"
-      ? { quality: "highestaudio", filter: "audioonly" }
-      : { quality: "highest", filter: "audioandvideo" };
-
-  const stream = ytdl.downloadFromInfo(info, streamOptions);
-
   try {
-    if (format === "mp3") {
-      return await downloadMp3({
-        stream,
-        targetPath,
+    const info = await ytdl.getInfo(url);
+    return await downloadWithYtdlCore({
+      sender: event.sender,
+      id,
+      info,
+      format,
+      resolution,
+      targetPath,
+      outputDir: output,
+    });
+  } catch (error) {
+    if (shouldFallbackToYtDlp(error)) {
+      return await downloadWithYtDlp({
         sender: event.sender,
         id,
-        title: details.title,
+        title: title || "Download",
+        url,
+        format,
+        resolution,
+        outputPath: targetPath,
         outputDir: output,
       });
     }
 
-    return await downloadMp4({
-      stream,
-      targetPath,
-      sender: event.sender,
-      id,
-      title: details.title,
-      outputDir: output,
-    });
-  } catch (error) {
     sendProgress(event.sender, {
       id,
-      title: details.title,
+      title: title || "Download",
       status: "failed",
       percent: 0,
       speed: "-",
       eta: "-",
       error: error instanceof Error ? error.message : "Download failed.",
     });
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setProgressBar(-1);
-    }
+    setProgress();
     throw error;
   }
 });

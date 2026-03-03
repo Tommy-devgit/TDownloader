@@ -1,0 +1,19 @@
+{
+  "appId": "com.tdownloader.app",
+  "productName": "TDownloader",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "package.json",
+    "assets/**/*"
+  ],
+  "win": {
+    "target": [
+      "nsis"
+    ],
+    "icon": "assets/icon.png"
+  }
+}

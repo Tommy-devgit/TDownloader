@@ -29,6 +29,50 @@ body {
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.28);
 }
 
+.app-drag {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+.window-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid #223244;
+  background: #0f1823;
+  border-radius: 12px;
+  padding: 8px 10px;
+}
+
+.window-title {
+  font-size: 12px;
+  color: #97b0c8;
+  letter-spacing: 0.4px;
+}
+
+.window-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.window-controls button {
+  width: 34px;
+  height: 28px;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.window-controls button.danger {
+  border-color: #72414f;
+}
+
+.window-controls button.danger:hover {
+  background: #612836;
+}
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -131,7 +175,7 @@ label {
 
 .grid {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 220px 220px 1fr;
   gap: 10px;
 }
 
@@ -297,4 +341,3 @@ label {
     grid-template-columns: 1fr;
   }
 }
-
