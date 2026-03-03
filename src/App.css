@@ -1,0 +1,132 @@
+:root {
+  font-family: "Segoe UI", "Arial", sans-serif;
+  line-height: 1.4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at top, #2d2d2d 0%, #151515 55%);
+}
+
+.card {
+  width: 100%;
+  max-width: 740px;
+  background: #1e1e1e;
+  border: 1px solid #2f2f2f;
+  border-radius: 14px;
+  padding: 24px;
+  color: #f1f1f1;
+  display: grid;
+  gap: 12px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.subtitle {
+  margin: 0 0 8px;
+  color: #b8b8b8;
+}
+
+label {
+  font-size: 13px;
+  color: #c4c4c4;
+}
+
+input,
+select,
+button {
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid #3b3b3b;
+  background: #111;
+  color: #fff;
+  padding: 0 12px;
+  font-size: 14px;
+}
+
+input:focus,
+select:focus,
+button:focus {
+  outline: 2px solid #f39c12;
+  outline-offset: 1px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button.primary {
+  background: #f39c12;
+  border-color: #f39c12;
+  color: #111;
+  font-weight: 700;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.status-grid {
+  margin-top: 6px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.status-grid div {
+  background: #151515;
+  border: 1px solid #2e2e2e;
+  border-radius: 10px;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.status-grid span {
+  font-size: 12px;
+  color: #a9a9a9;
+}
+
+.status-grid strong {
+  font-size: 15px;
+}
+
+.status {
+  margin: 4px 0 0;
+  color: #f6dba7;
+}
+
+@media (max-width: 720px) {
+  .card {
+    padding: 18px;
+  }
+
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .row {
+    grid-template-columns: 1fr;
+  }
+}
