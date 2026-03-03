@@ -2,8 +2,47 @@ const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn, spawnSync } = require("child_process");
+const os = require("os");
 
 const isDev = !app.isPackaged;
+
+function resolveExecutable(name) {
+  const pathEntries = (process.env.PATH || "").split(path.delimiter);
+  const home = os.homedir();
+  const ffmpegRoot = path.join(
+    home,
+    "AppData",
+    "Local",
+    "Microsoft",
+    "WinGet",
+    "Packages",
+    "yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+  );
+  let ffmpegBin = null;
+  if (fs.existsSync(ffmpegRoot)) {
+    const entries = fs.readdirSync(ffmpegRoot, { withFileTypes: true });
+    const versionDir = entries.find((entry) => entry.isDirectory());
+    if (versionDir) {
+      ffmpegBin = path.join(ffmpegRoot, versionDir.name, "bin");
+    }
+  }
+
+  const fallbackDirs = [
+    path.join(home, "AppData", "Local", "Programs", "TDownloaderTools"),
+    path.join(home, "AppData", "Local", "Microsoft", "WinGet", "Packages", "yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe"),
+    ffmpegBin,
+  ];
+
+  const candidates = [...pathEntries, ...fallbackDirs].filter(Boolean);
+  for (const dir of candidates) {
+    const full = path.join(dir, name);
+    if (fs.existsSync(full)) {
+      return full;
+    }
+  }
+
+  return name;
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -41,7 +80,8 @@ function parseProgressLine(line) {
 }
 
 function ensureYtDlp() {
-  const check = spawnSync("yt-dlp", ["--version"], {
+  const ytDlpPath = resolveExecutable("yt-dlp.exe");
+  const check = spawnSync(ytDlpPath, ["--version"], {
     encoding: "utf8",
     windowsHide: true,
   });
@@ -76,6 +116,8 @@ ipcMain.handle("download:start", async (event, payload) => {
 
   const finalOutputDir = outputDir || app.getPath("downloads");
   await fs.promises.mkdir(finalOutputDir, { recursive: true });
+  const ytDlpPath = resolveExecutable("yt-dlp.exe");
+  const ffmpegPath = resolveExecutable("ffmpeg.exe");
 
   const outputTemplate = path.join(finalOutputDir, "%(title)s.%(ext)s");
 
@@ -88,6 +130,8 @@ ipcMain.handle("download:start", async (event, payload) => {
     ...formatArgs,
     "--no-playlist",
     "--newline",
+    "--ffmpeg-location",
+    path.dirname(ffmpegPath),
     "--progress-template",
     "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
     "-o",
@@ -96,7 +140,7 @@ ipcMain.handle("download:start", async (event, payload) => {
   ];
 
   return new Promise((resolve, reject) => {
-    const proc = spawn("yt-dlp", args, {
+    const proc = spawn(ytDlpPath, args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
