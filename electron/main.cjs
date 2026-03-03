@@ -1,10 +1,39 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
-const path = require("path");
+const {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Tray,
+  Menu,
+  nativeImage,
+} = require("electron");
 const fs = require("fs");
-const { spawn, spawnSync } = require("child_process");
 const os = require("os");
+const path = require("path");
+const { spawn } = require("child_process");
+const ytdl = require("ytdl-core");
 
 const isDev = !app.isPackaged;
+let mainWindow = null;
+let tray = null;
+
+function findFirstExisting(paths) {
+  for (const filePath of paths) {
+    if (fs.existsSync(filePath)) {
+      return filePath;
+    }
+  }
+  return null;
+}
+
+function getIconPath() {
+  const candidates = [
+    path.join(__dirname, "..", "assets", "icon.png"),
+    path.join(__dirname, "..", "assets", "icon.ico"),
+    path.join(__dirname, "..", "public", "vite.svg"),
+  ];
+  return findFirstExisting(candidates);
+}
 
 function resolveExecutable(name) {
   const pathEntries = (process.env.PATH || "").split(path.delimiter);
@@ -18,6 +47,7 @@ function resolveExecutable(name) {
     "Packages",
     "yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
   );
+
   let ffmpegBin = null;
   if (fs.existsSync(ffmpegRoot)) {
     const entries = fs.readdirSync(ffmpegRoot, { withFileTypes: true });
@@ -29,7 +59,6 @@ function resolveExecutable(name) {
 
   const fallbackDirs = [
     path.join(home, "AppData", "Local", "Programs", "TDownloaderTools"),
-    path.join(home, "AppData", "Local", "Microsoft", "WinGet", "Packages", "yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe"),
     ffmpegBin,
   ];
 
@@ -44,13 +73,58 @@ function resolveExecutable(name) {
   return name;
 }
 
+function createTray() {
+  const iconPath = getIconPath();
+  if (!iconPath) {
+    return;
+  }
+
+  let trayIcon = nativeImage.createFromPath(iconPath);
+  if (trayIcon.isEmpty()) {
+    return;
+  }
+
+  trayIcon = trayIcon.resize({ width: 18, height: 18 });
+  tray = new Tray(trayIcon);
+  tray.setToolTip("TDownloader");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "Show App",
+        click: () => {
+          if (!mainWindow) {
+            return;
+          }
+          mainWindow.show();
+          mainWindow.focus();
+        },
+      },
+      { type: "separator" },
+      { role: "quit", label: "Quit" },
+    ])
+  );
+
+  tray.on("double-click", () => {
+    if (!mainWindow) {
+      return;
+    }
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
+
 function createWindow() {
-  const win = new BrowserWindow({
-    width: 1100,
-    height: 760,
-    minWidth: 900,
-    minHeight: 620,
-    backgroundColor: "#111111",
+  const iconPath = getIconPath();
+
+  mainWindow = new BrowserWindow({
+    width: 1180,
+    height: 780,
+    minWidth: 980,
+    minHeight: 680,
+    show: false,
+    backgroundColor: "#0d1014",
+    title: "TDownloader",
+    icon: iconPath || undefined,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -59,38 +133,200 @@ function createWindow() {
     },
   });
 
+  mainWindow.once("ready-to-show", () => {
+    mainWindow.show();
+  });
+
   if (isDev) {
-    win.loadURL("http://localhost:5173");
+    // Hot-reload Electron process files during development.
+    try {
+      require("electron-reload")(path.join(__dirname, ".."), {
+        hardResetMethod: "exit",
+      });
+    } catch {
+      // Best-effort in development only.
+    }
+    mainWindow.loadURL("http://localhost:5173");
   } else {
-    win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+    mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
 }
 
-function parseProgressLine(line) {
-  const match = line.match(/^download:([^|]+)\|([^|]+)\|(.+)$/);
-  if (!match) {
-    return null;
+function sanitizeFileName(name) {
+  return name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").slice(0, 140).trim();
+}
+
+function formatDuration(secondsText) {
+  const totalSeconds = Number(secondsText || 0);
+  if (!Number.isFinite(totalSeconds)) {
+    return "--:--";
+  }
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = Math.floor(totalSeconds % 60);
+
+  const hh = String(hours).padStart(2, "0");
+  const mm = String(minutes).padStart(2, "0");
+  const ss = String(seconds).padStart(2, "0");
+
+  return hours > 0 ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function sendProgress(webContents, payload) {
+  if (!webContents || webContents.isDestroyed()) {
+    return;
+  }
+  webContents.send("download:progress", payload);
+}
+
+async function downloadMp4({
+  stream,
+  targetPath,
+  sender,
+  id,
+  title,
+  outputDir,
+}) {
+  await new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(targetPath);
+
+    stream.on("progress", (_, downloaded, total) => {
+      const percent = total > 0 ? (downloaded / total) * 100 : 0;
+      sendProgress(sender, {
+        id,
+        title,
+        status: "downloading",
+        percent: Number(percent.toFixed(2)),
+        speed: "-",
+        eta: "-",
+      });
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(percent / 100);
+      }
+    });
+
+    stream.on("error", reject);
+    file.on("error", reject);
+    file.on("finish", resolve);
+
+    stream.pipe(file);
+  });
+
+  sendProgress(sender, {
+    id,
+    title,
+    status: "completed",
+    percent: 100,
+    speed: "done",
+    eta: "0s",
+    filePath: targetPath,
+  });
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setProgressBar(-1);
   }
 
   return {
-    percent: match[1].trim(),
-    speed: match[2].trim(),
-    eta: match[3].trim(),
+    success: true,
+    filePath: targetPath,
+    outputDir,
+    message: "Download completed.",
   };
 }
 
-function ensureYtDlp() {
-  const ytDlpPath = resolveExecutable("yt-dlp.exe");
-  const check = spawnSync(ytDlpPath, ["--version"], {
-    encoding: "utf8",
-    windowsHide: true,
+async function downloadMp3({
+  stream,
+  targetPath,
+  sender,
+  id,
+  title,
+  outputDir,
+}) {
+  const ffmpegPath = resolveExecutable("ffmpeg.exe");
+
+  await new Promise((resolve, reject) => {
+    const ffmpeg = spawn(
+      ffmpegPath,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-codec:a",
+        "libmp3lame",
+        "-q:a",
+        "2",
+        "-y",
+        targetPath,
+      ],
+      {
+        windowsHide: true,
+        stdio: ["pipe", "ignore", "pipe"],
+      }
+    );
+
+    stream.on("progress", (_, downloaded, total) => {
+      const percent = total > 0 ? (downloaded / total) * 100 : 0;
+      sendProgress(sender, {
+        id,
+        title,
+        status: "downloading",
+        percent: Number(percent.toFixed(2)),
+        speed: "converting",
+        eta: "-",
+      });
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(percent / 100);
+      }
+    });
+
+    let errorText = "";
+    ffmpeg.stderr.on("data", (chunk) => {
+      errorText += chunk.toString();
+    });
+
+    ffmpeg.on("error", (err) => {
+      reject(
+        new Error(
+          `Failed to start ffmpeg (${ffmpegPath}). ${err.message}`
+        )
+      );
+    });
+
+    ffmpeg.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(errorText.trim() || `ffmpeg exited with code ${code}`));
+        return;
+      }
+      resolve();
+    });
+
+    stream.on("error", reject);
+    stream.pipe(ffmpeg.stdin);
   });
 
-  if (check.status !== 0) {
-    throw new Error(
-      "yt-dlp was not found on PATH. Install yt-dlp and ffmpeg first."
-    );
+  sendProgress(sender, {
+    id,
+    title,
+    status: "completed",
+    percent: 100,
+    speed: "done",
+    eta: "0s",
+    filePath: targetPath,
+  });
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setProgressBar(-1);
   }
+
+  return {
+    success: true,
+    filePath: targetPath,
+    outputDir,
+    message: "Download completed.",
+  };
 }
 
 ipcMain.handle("dialog:chooseOutputFolder", async () => {
@@ -105,90 +341,103 @@ ipcMain.handle("dialog:chooseOutputFolder", async () => {
   return result.filePaths[0];
 });
 
-ipcMain.handle("download:start", async (event, payload) => {
-  const { url, outputDir, format } = payload || {};
+ipcMain.handle("video:getInfo", async (_, url) => {
+  if (!url || typeof url !== "string" || !ytdl.validateURL(url)) {
+    throw new Error("Enter a valid YouTube URL.");
+  }
 
-  if (!url || typeof url !== "string") {
+  const info = await ytdl.getBasicInfo(url.trim());
+  const details = info.videoDetails;
+  const thumb =
+    details.thumbnails && details.thumbnails.length > 0
+      ? details.thumbnails[details.thumbnails.length - 1].url
+      : "";
+
+  return {
+    id: details.videoId,
+    title: details.title,
+    author: details.author?.name || "Unknown",
+    duration: formatDuration(details.lengthSeconds),
+    thumbnail: thumb,
+    url: details.video_url || url,
+  };
+});
+
+ipcMain.handle("download:start", async (event, payload) => {
+  const { id, url, outputDir, format, title } = payload || {};
+  if (!id || typeof id !== "string") {
+    throw new Error("Download ID is required.");
+  }
+  if (!url || typeof url !== "string" || !ytdl.validateURL(url)) {
     throw new Error("A valid YouTube URL is required.");
   }
 
-  ensureYtDlp();
+  const output = outputDir || app.getPath("downloads");
+  await fs.promises.mkdir(output, { recursive: true });
 
-  const finalOutputDir = outputDir || app.getPath("downloads");
-  await fs.promises.mkdir(finalOutputDir, { recursive: true });
-  const ytDlpPath = resolveExecutable("yt-dlp.exe");
-  const ffmpegPath = resolveExecutable("ffmpeg.exe");
+  const info = await ytdl.getInfo(url);
+  const details = info.videoDetails;
+  const safeBaseName = sanitizeFileName(title || details.title || id);
+  const extension = format === "mp3" ? "mp3" : "mp4";
+  const targetPath = path.join(output, `${safeBaseName}-${Date.now()}.${extension}`);
 
-  const outputTemplate = path.join(finalOutputDir, "%(title)s.%(ext)s");
-
-  const formatArgs =
-    format === "mp3"
-      ? ["-x", "--audio-format", "mp3", "--audio-quality", "0"]
-      : ["-f", "bv*+ba/b", "--merge-output-format", "mp4"];
-
-  const args = [
-    ...formatArgs,
-    "--no-playlist",
-    "--newline",
-    "--ffmpeg-location",
-    path.dirname(ffmpegPath),
-    "--progress-template",
-    "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
-    "-o",
-    outputTemplate,
-    url,
-  ];
-
-  return new Promise((resolve, reject) => {
-    const proc = spawn(ytDlpPath, args, {
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stderr = "";
-
-    proc.stdout.on("data", (chunk) => {
-      const lines = chunk.toString().split(/\r?\n/);
-      for (const line of lines) {
-        const progress = parseProgressLine(line.trim());
-        if (progress) {
-          event.sender.send("download:progress", progress);
-        }
-      }
-    });
-
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on("error", (err) => {
-      reject(new Error(`Failed to start yt-dlp: ${err.message}`));
-    });
-
-    proc.on("close", (code) => {
-      if (code === 0) {
-        event.sender.send("download:progress", {
-          percent: "100%",
-          speed: "done",
-          eta: "0s",
-        });
-
-        resolve({
-          success: true,
-          outputDir: finalOutputDir,
-          message: "Download completed.",
-        });
-        return;
-      }
-
-      const reason = stderr.trim() || `yt-dlp exited with code ${code}`;
-      reject(new Error(reason));
-    });
+  sendProgress(event.sender, {
+    id,
+    title: details.title,
+    status: "starting",
+    percent: 0,
+    speed: "-",
+    eta: "-",
   });
+
+  const streamOptions =
+    format === "mp3"
+      ? { quality: "highestaudio", filter: "audioonly" }
+      : { quality: "highest", filter: "audioandvideo" };
+
+  const stream = ytdl.downloadFromInfo(info, streamOptions);
+
+  try {
+    if (format === "mp3") {
+      return await downloadMp3({
+        stream,
+        targetPath,
+        sender: event.sender,
+        id,
+        title: details.title,
+        outputDir: output,
+      });
+    }
+
+    return await downloadMp4({
+      stream,
+      targetPath,
+      sender: event.sender,
+      id,
+      title: details.title,
+      outputDir: output,
+    });
+  } catch (error) {
+    sendProgress(event.sender, {
+      id,
+      title: details.title,
+      status: "failed",
+      percent: 0,
+      speed: "-",
+      eta: "-",
+      error: error instanceof Error ? error.message : "Download failed.",
+    });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setProgressBar(-1);
+    }
+    throw error;
+  }
 });
 
 app.whenReady().then(() => {
+  app.setAppUserModelId("com.tdownloader.app");
   createWindow();
+  createTray();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -202,3 +451,4 @@ app.on("window-all-closed", () => {
     app.quit();
   }
 });
+

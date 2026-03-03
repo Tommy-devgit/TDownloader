@@ -1,27 +1,38 @@
 # TDownloader
 
-Electron desktop app for downloading YouTube videos/audio using `yt-dlp`.
+Electron desktop app for downloading YouTube videos/audio with queue support and progress bars.
 
 ## Requirements
 
 - Node.js 20+
-- `yt-dlp` available on your PATH
-- `ffmpeg` available on your PATH (required for MP3 extraction and merging)
+- `ffmpeg` available on your PATH (required for MP3 conversion)
 
-## Run
+## Architecture
+
+- Main Process: `electron/main.cjs` (window lifecycle, tray, IPC, downloader logic)
+- Preload Bridge: `electron/preload.cjs`
+- Renderer UI: `src/App.tsx` + `src/App.css`
+- Backend Downloader: `ytdl-core` in main process
+
+## Run Dev
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Build web assets
+## Package Installer (Windows)
 
 ```bash
-npm run build
+npm run dist:win
 ```
+
+## App Icon Setup
+
+- Place your PNG icon at `assets/icon.png`
+- For best Windows installer/taskbar compatibility, also add `assets/icon.ico`
 
 ## Notes
 
-- If output folder is empty, downloads go to your system Downloads directory.
-- This project does not package an installer yet; it runs locally with Electron.
+- If output folder is empty, files are downloaded into your system Downloads directory.
+- MP4 uses progressive streams; MP3 uses ffmpeg conversion.
