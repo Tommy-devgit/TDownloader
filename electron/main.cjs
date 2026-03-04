@@ -16,6 +16,8 @@ const ytdl = require("ytdl-core");
 const isDev = !app.isPackaged;
 let mainWindow = null;
 let tray = null;
+const activeYtDlpDownloads = new Map();
+const userStoppedDownloads = new Set();
 
 function findFirstExisting(paths) {
   for (const filePath of paths) {
@@ -309,6 +311,7 @@ function buildYtdlpArgs({ url, format, resolution, outputPath, ffmpegPath }) {
       "mp3",
       "--audio-quality",
       "0",
+      "--continue",
       "--ffmpeg-location",
       path.dirname(ffmpegPath),
       "--newline",
@@ -332,6 +335,7 @@ function buildYtdlpArgs({ url, format, resolution, outputPath, ffmpegPath }) {
     formatSelector,
     "--merge-output-format",
     "mp4",
+    "--continue",
     "--ffmpeg-location",
     path.dirname(ffmpegPath),
     "--newline",
@@ -369,6 +373,7 @@ async function downloadWithYtDlp({
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    activeYtDlpDownloads.set(id, proc);
 
     let stderr = "";
     proc.stdout.on("data", (chunk) => {
@@ -395,11 +400,18 @@ async function downloadWithYtDlp({
     });
 
     proc.on("error", (err) => {
+      activeYtDlpDownloads.delete(id);
       reject(new Error(`Failed to start yt-dlp: ${err.message}`));
     });
     proc.on("close", (code) => {
+      activeYtDlpDownloads.delete(id);
       if (code === 0) {
         resolve();
+        return;
+      }
+      if (userStoppedDownloads.has(id)) {
+        userStoppedDownloads.delete(id);
+        reject(new Error("Download stopped by user."));
         return;
       }
       reject(new Error(stderr.trim() || `yt-dlp exited with code ${code}`));
@@ -425,150 +437,18 @@ async function downloadWithYtDlp({
   };
 }
 
-function selectProgressiveFormat(formats, resolution) {
-  const progressive = formats
-    .filter((f) => f.hasVideo && f.hasAudio && f.container === "mp4")
-    .sort((a, b) => (b.height || 0) - (a.height || 0));
-
-  if (progressive.length === 0) {
-    return null;
-  }
-
-  if (!resolution || resolution === "best") {
-    return progressive[0];
-  }
-
-  const cap = Number(resolution);
-  if (!Number.isFinite(cap)) {
-    return progressive[0];
-  }
-
-  return progressive.find((f) => (f.height || 0) <= cap) || progressive[0];
-}
-
-async function downloadWithYtdlCore({
-  sender,
-  id,
-  info,
-  format,
-  resolution,
-  targetPath,
-  outputDir,
-}) {
-  const details = info.videoDetails;
-  const streamOptions =
-    format === "mp3"
-      ? { quality: "highestaudio", filter: "audioonly" }
-      : (() => {
-          const fmt = selectProgressiveFormat(info.formats, resolution);
-          if (!fmt) {
-            throw new Error("No progressive MP4 format available for this video.");
-          }
-          return { quality: fmt.itag };
-        })();
-
-  const stream = ytdl.downloadFromInfo(info, streamOptions);
-
-  if (format === "mp4") {
-    await new Promise((resolve, reject) => {
-      const file = fs.createWriteStream(targetPath);
-      stream.on("progress", (_, downloaded, total) => {
-        const percent = total > 0 ? Number(((downloaded / total) * 100).toFixed(2)) : 0;
-        sendProgress(sender, {
-          id,
-          title: details.title,
-          status: "downloading",
-          percent,
-          speed: "-",
-          eta: "-",
-        });
-        setProgress(percent);
-      });
-      stream.on("error", reject);
-      file.on("error", reject);
-      file.on("finish", resolve);
-      stream.pipe(file);
-    });
-  } else {
-    const ffmpegPath = resolveExecutable("ffmpeg.exe");
-    await new Promise((resolve, reject) => {
-      const ffmpeg = spawn(
-        ffmpegPath,
-        [
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-i",
-          "pipe:0",
-          "-vn",
-          "-codec:a",
-          "libmp3lame",
-          "-q:a",
-          "2",
-          "-y",
-          targetPath,
-        ],
-        { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] }
-      );
-      let errorText = "";
-      ffmpeg.stderr.on("data", (chunk) => {
-        errorText += chunk.toString();
-      });
-      stream.on("progress", (_, downloaded, total) => {
-        const percent = total > 0 ? Number(((downloaded / total) * 100).toFixed(2)) : 0;
-        sendProgress(sender, {
-          id,
-          title: details.title,
-          status: "downloading",
-          percent,
-          speed: "converting",
-          eta: "-",
-        });
-        setProgress(percent);
-      });
-      stream.on("error", reject);
-      ffmpeg.on("error", reject);
-      ffmpeg.on("close", (code) => {
-        if (code !== 0) {
-          reject(new Error(errorText.trim() || `ffmpeg exited with code ${code}`));
-          return;
-        }
-        resolve();
-      });
-      stream.pipe(ffmpeg.stdin);
-    });
-  }
-
-  setProgress();
-  sendProgress(sender, {
-    id,
-    title: details.title,
-    status: "completed",
-    percent: 100,
-    speed: "done",
-    eta: "0s",
-    filePath: targetPath,
-  });
-
-  return {
-    success: true,
-    filePath: targetPath,
-    outputDir,
-    message: "Download completed.",
-  };
-}
-
-function shouldFallbackToYtDlp(error) {
-  if (!error || !(error instanceof Error)) {
+ipcMain.handle("download:cancel", async (_, id) => {
+  if (!id || typeof id !== "string") {
     return false;
   }
-  const msg = error.message || "";
-  return (
-    msg.includes("Could not extract functions") ||
-    msg.includes("Could not extract decipher") ||
-    msg.includes("No n transform function")
-  );
-}
+  const proc = activeYtDlpDownloads.get(id);
+  if (!proc) {
+    return false;
+  }
+  userStoppedDownloads.add(id);
+  proc.kill("SIGTERM");
+  return true;
+});
 
 ipcMain.handle("window:minimize", () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -687,7 +567,7 @@ ipcMain.handle("download:start", async (event, payload) => {
 
   const safeBaseName = sanitizeFileName(title || id);
   const extension = format === "mp3" ? "mp3" : "mp4";
-  const targetPath = path.join(output, `${safeBaseName}-${Date.now()}.${extension}`);
+  const targetPath = path.join(output, `${safeBaseName}-${id}.${extension}`);
 
   sendProgress(event.sender, {
     id,
@@ -699,38 +579,27 @@ ipcMain.handle("download:start", async (event, payload) => {
   });
 
   try {
-    const info = await ytdl.getInfo(url);
-    return await downloadWithYtdlCore({
+    return await downloadWithYtDlp({
       sender: event.sender,
       id,
-      info,
+      title: title || "Download",
+      url,
       format,
       resolution,
-      targetPath,
+      outputPath: targetPath,
       outputDir: output,
     });
   } catch (error) {
-    if (shouldFallbackToYtDlp(error)) {
-      return await downloadWithYtDlp({
-        sender: event.sender,
-        id,
-        title: title || "Download",
-        url,
-        format,
-        resolution,
-        outputPath: targetPath,
-        outputDir: output,
-      });
-    }
-
+    const message = error instanceof Error ? error.message : "Download failed.";
+    const failedStatus = message === "Download stopped by user." ? "stopped" : "failed";
     sendProgress(event.sender, {
       id,
       title: title || "Download",
-      status: "failed",
+      status: failedStatus,
       percent: 0,
       speed: "-",
       eta: "-",
-      error: error instanceof Error ? error.message : "Download failed.",
+      error: message,
     });
     setProgress();
     throw error;

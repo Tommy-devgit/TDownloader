@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getVideoInfo: (url) => ipcRenderer.invoke("video:getInfo", url),
   getPlaylistInfo: (url) => ipcRenderer.invoke("playlist:getInfo", url),
   downloadVideo: (payload) => ipcRenderer.invoke("download:start", payload),
+  cancelDownload: (id) => ipcRenderer.invoke("download:cancel", id),
   minimizeWindow: () => ipcRenderer.invoke("window:minimize"),
   toggleMaximizeWindow: () => ipcRenderer.invoke("window:toggleMaximize"),
   closeWindow: () => ipcRenderer.invoke("window:close"),

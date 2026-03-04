@@ -1,7 +1,7 @@
 interface DownloadProgress {
   id: string;
   title: string;
-  status: "starting" | "downloading" | "completed" | "failed";
+  status: "starting" | "downloading" | "completed" | "failed" | "stopped";
   percent: number;
   speed: string;
   eta: string;
@@ -47,6 +47,7 @@ interface ElectronAPI {
   getVideoInfo: (url: string) => Promise<VideoInfo>;
   getPlaylistInfo: (url: string) => Promise<PlaylistInfo>;
   downloadVideo: (payload: DownloadPayload) => Promise<DownloadResult>;
+  cancelDownload: (id: string) => Promise<boolean>;
   minimizeWindow: () => Promise<void>;
   toggleMaximizeWindow: () => Promise<boolean>;
   closeWindow: () => Promise<void>;

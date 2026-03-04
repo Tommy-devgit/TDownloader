@@ -1,9 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 type DownloadFormat = "mp4" | "mp3";
 type DownloadResolution = "best" | "2160" | "1440" | "1080" | "720" | "480" | "360";
-type DownloadStatus = "queued" | "starting" | "downloading" | "completed" | "failed";
+type DownloadStatus =
+  | "queued"
+  | "starting"
+  | "downloading"
+  | "paused"
+  | "stopped"
+  | "completed"
+  | "failed";
 
 type QueueItem = {
   id: string;
@@ -23,6 +30,22 @@ type QueueItem = {
   error?: string;
 };
 
+type PlaylistDraftItem = {
+  key: string;
+  id: string;
+  title: string;
+  author: string;
+  duration: string;
+  thumbnail: string;
+  url: string;
+};
+
+type PlaylistDraft = {
+  title: string;
+  items: PlaylistDraftItem[];
+  selectedKeys: string[];
+};
+
 const RESOLUTION_OPTIONS: DownloadResolution[] = [
   "best",
   "2160",
@@ -37,6 +60,8 @@ function statusLabel(status: DownloadStatus): string {
   if (status === "queued") return "Queued";
   if (status === "starting") return "Starting";
   if (status === "downloading") return "Downloading";
+  if (status === "paused") return "Paused";
+  if (status === "stopped") return "Stopped";
   if (status === "completed") return "Completed";
   return "Failed";
 }
@@ -62,8 +87,29 @@ function App() {
   const [status, setStatus] = useState("Ready");
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [processing, setProcessing] = useState(false);
+  const [queuePaused, setQueuePaused] = useState(false);
+  const [activeDownloadId, setActiveDownloadId] = useState<string | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
-  const [supportedResolutions, setSupportedResolutions] = useState<DownloadResolution[]>(RESOLUTION_OPTIONS);
+  const [supportedResolutions, setSupportedResolutions] =
+    useState<DownloadResolution[]>(RESOLUTION_OPTIONS);
+  const [playlistDraft, setPlaylistDraft] = useState<PlaylistDraft | null>(null);
+
+  const queueRef = useRef<QueueItem[]>([]);
+  const processingRef = useRef(false);
+  const pausedIdsRef = useRef<Set<string>>(new Set());
+  const queuePausedRef = useRef(false);
+
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
+
+  useEffect(() => {
+    processingRef.current = processing;
+  }, [processing]);
+
+  useEffect(() => {
+    queuePausedRef.current = queuePaused;
+  }, [queuePaused]);
 
   useEffect(() => {
     window.electronAPI.isWindowMaximized().then(setIsMaximized).catch(() => undefined);
@@ -77,7 +123,7 @@ function App() {
           item.id === update.id
             ? {
                 ...item,
-                status: update.status,
+                status: update.status as DownloadStatus,
                 percent: update.percent,
                 speed: update.speed,
                 eta: update.eta,
@@ -103,12 +149,65 @@ function App() {
     () => queue.filter((item) => item.status === "downloading" || item.status === "starting").length,
     [queue]
   );
+  const completedCount = useMemo(
+    () => queue.filter((item) => item.status === "completed").length,
+    [queue]
+  );
 
   const chooseFolder = async () => {
     const folder = await window.electronAPI.chooseOutputFolder();
     if (folder) {
       setOutputDir(folder);
     }
+  };
+
+  const addSelectedPlaylistItemsToQueue = () => {
+    if (!playlistDraft) {
+      return;
+    }
+    const selected = playlistDraft.items.filter((item) =>
+      playlistDraft.selectedKeys.includes(item.key)
+    );
+    if (selected.length === 0) {
+      setStatus("Select at least one playlist item.");
+      return;
+    }
+
+    const queuedResolution: DownloadResolution = format === "mp3" ? "best" : resolution;
+    const stamp = Date.now();
+    const newItems: QueueItem[] = selected.map((item, index) => ({
+      id: `${item.id}-${stamp}-${index}`,
+      videoId: item.id,
+      url: item.url,
+      title: item.title,
+      author: item.author,
+      duration: item.duration,
+      thumbnail: item.thumbnail,
+      format,
+      resolution: queuedResolution,
+      status: "queued",
+      percent: 0,
+      speed: "-",
+      eta: "-",
+    }));
+
+    setQueue((prev) => [...newItems, ...prev]);
+    setPlaylistDraft(null);
+    setUrl("");
+    setStatus(`Added ${newItems.length} selected playlist item(s) to queue.`);
+  };
+
+  const togglePlaylistItem = (key: string) => {
+    setPlaylistDraft((prev) => {
+      if (!prev) return prev;
+      const exists = prev.selectedKeys.includes(key);
+      return {
+        ...prev,
+        selectedKeys: exists
+          ? prev.selectedKeys.filter((value) => value !== key)
+          : [...prev.selectedKeys, key],
+      };
+    });
   };
 
   const addToQueue = async () => {
@@ -122,31 +221,28 @@ function App() {
       const queuedResolution: DownloadResolution = format === "mp3" ? "best" : resolution;
 
       if (isPlaylistUrl(trimmed)) {
+        if (typeof window.electronAPI.getPlaylistInfo !== "function") {
+          setStatus("Playlist bridge is unavailable. Restart the app.");
+          return;
+        }
         setStatus("Fetching playlist info...");
         const playlist = await window.electronAPI.getPlaylistInfo(trimmed);
-        const timestamp = Date.now();
-        const newItems: QueueItem[] = playlist.items.map((item, index) => ({
-          id: `${item.id}-${timestamp}-${index}`,
-          videoId: item.id,
-          url: item.url,
+        const draftItems: PlaylistDraftItem[] = playlist.items.map((item, index) => ({
+          key: `${item.id}-${index}`,
+          id: item.id,
           title: item.title,
           author: item.author,
           duration: item.duration,
           thumbnail: item.thumbnail,
-          format,
-          resolution: queuedResolution,
-          status: "queued",
-          percent: 0,
-          speed: "-",
-          eta: "-",
+          url: item.url,
         }));
-
-        setQueue((prev) => [...newItems, ...prev]);
+        setPlaylistDraft({
+          title: playlist.title,
+          items: draftItems,
+          selectedKeys: draftItems.map((item) => item.key),
+        });
         setSupportedResolutions(RESOLUTION_OPTIONS);
-        setUrl("");
-        setStatus(
-          `Added ${newItems.length} item(s) from "${playlist.title}" to queue.`
-        );
+        setStatus(`Choose playlist items from "${playlist.title}" and add them to queue.`);
         return;
       }
 
@@ -187,57 +283,139 @@ function App() {
     }
   };
 
-  const startQueue = async () => {
-    if (processing) {
+  const pauseQueue = async () => {
+    if (!processingRef.current) {
       return;
     }
-    const pending = queue.filter((item) => item.status === "queued" || item.status === "failed");
-    if (pending.length === 0) {
+    setQueuePaused(true);
+    queuePausedRef.current = true;
+    if (activeDownloadId) {
+      pausedIdsRef.current.add(activeDownloadId);
+      await window.electronAPI.cancelDownload(activeDownloadId).catch(() => undefined);
+    }
+  };
+
+  const stopItem = async (item: QueueItem) => {
+    if (item.status === "queued") {
+      setQueue((prev) =>
+        prev.map((entry) =>
+          entry.id === item.id
+            ? { ...entry, status: "stopped", error: "Stopped by user." }
+            : entry
+        )
+      );
+      return;
+    }
+    if (item.status === "starting" || item.status === "downloading") {
+      await window.electronAPI.cancelDownload(item.id).catch(() => undefined);
+      setQueue((prev) =>
+        prev.map((entry) =>
+          entry.id === item.id
+            ? { ...entry, status: "stopped", error: "Stopped by user." }
+            : entry
+        )
+      );
+    }
+  };
+
+  const resumeItem = (itemId: string) => {
+    setQueue((prev) =>
+      prev.map((entry) =>
+        entry.id === itemId
+          ? { ...entry, status: "queued", error: undefined }
+          : entry
+      )
+    );
+    setStatus("Item moved back to queue.");
+  };
+
+  const startQueue = async () => {
+    if (processingRef.current) {
+      return;
+    }
+    const pendingIds = queueRef.current
+      .filter((item) =>
+        item.status === "queued" ||
+        item.status === "failed" ||
+        item.status === "paused"
+      )
+      .map((item) => item.id);
+
+    if (pendingIds.length === 0) {
       setStatus("Queue is empty.");
       return;
     }
 
     setProcessing(true);
-    setStatus(`Starting ${pending.length} download(s)...`);
+    processingRef.current = true;
+    setQueuePaused(false);
+    queuePausedRef.current = false;
+    setStatus(`Starting ${pendingIds.length} download(s)...`);
 
     try {
-      for (const item of pending) {
+      for (const id of pendingIds) {
+        if (queuePausedRef.current) {
+          break;
+        }
+        const current = queueRef.current.find((entry) => entry.id === id);
+        if (!current || current.status === "stopped" || current.status === "completed") {
+          continue;
+        }
+
+        setActiveDownloadId(id);
         setQueue((prev) =>
           prev.map((entry) =>
-            entry.id === item.id ? { ...entry, status: "starting", error: undefined } : entry
+            entry.id === id ? { ...entry, status: "starting", error: undefined } : entry
           )
         );
 
         try {
           const result = await window.electronAPI.downloadVideo({
-            id: item.id,
-            url: item.url,
+            id,
+            url: current.url,
             outputDir: outputDir || undefined,
-            format: item.format,
-            resolution: item.resolution,
-            title: item.title,
+            format: current.format,
+            resolution: current.resolution,
+            title: current.title,
           });
 
           setQueue((prev) =>
             prev.map((entry) =>
-              entry.id === item.id
+              entry.id === id
                 ? { ...entry, status: "completed", percent: 100, filePath: result.filePath }
                 : entry
             )
           );
         } catch (error) {
           const message = error instanceof Error ? error.message : "Download failed.";
+          const pausedByUser = pausedIdsRef.current.has(id);
+          if (pausedByUser) {
+            pausedIdsRef.current.delete(id);
+          }
           setQueue((prev) =>
             prev.map((entry) =>
-              entry.id === item.id ? { ...entry, status: "failed", error: message } : entry
+              entry.id === id
+                ? {
+                    ...entry,
+                    status: pausedByUser ? "paused" : "failed",
+                    error: pausedByUser ? "Paused by user." : message,
+                  }
+                : entry
             )
           );
+        } finally {
+          setActiveDownloadId((currentId) => (currentId === id ? null : currentId));
         }
       }
 
-      setStatus("Queue processing finished.");
+      if (queuePausedRef.current) {
+        setStatus("Queue paused.");
+      } else {
+        setStatus("Queue processing finished.");
+      }
     } finally {
       setProcessing(false);
+      processingRef.current = false;
     }
   };
 
@@ -265,9 +443,16 @@ function App() {
             <p>Queue-based YouTube desktop downloader with progress tracking</p>
           </div>
           <div className="header-actions">
-            <button type="button" onClick={startQueue} disabled={processing || queuedCount === 0}>
-              {processing ? "Working..." : "Start Queue"}
-            </button>
+            {!processing && (
+              <button type="button" onClick={startQueue} disabled={queuedCount === 0}>
+                {queuePaused ? "Resume Queue" : "Start Queue"}
+              </button>
+            )}
+            {processing && (
+              <button type="button" onClick={pauseQueue}>
+                Pause Queue
+              </button>
+            )}
           </div>
         </header>
 
@@ -334,6 +519,58 @@ function App() {
           </div>
         </section>
 
+        {playlistDraft && (
+          <section className="playlist-picker">
+            <div className="playlist-head">
+              <h2>{playlistDraft.title}</h2>
+              <span>{playlistDraft.selectedKeys.length} selected</span>
+            </div>
+            <div className="playlist-actions">
+              <button
+                type="button"
+                onClick={() =>
+                  setPlaylistDraft((prev) =>
+                    prev
+                      ? { ...prev, selectedKeys: prev.items.map((item) => item.key) }
+                      : prev
+                  )
+                }
+              >
+                Select All
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setPlaylistDraft((prev) => (prev ? { ...prev, selectedKeys: [] } : prev))
+                }
+              >
+                Select None
+              </button>
+              <button type="button" className="primary" onClick={addSelectedPlaylistItemsToQueue}>
+                Add Selected
+              </button>
+              <button type="button" onClick={() => setPlaylistDraft(null)}>
+                Cancel
+              </button>
+            </div>
+            <div className="playlist-list">
+              {playlistDraft.items.map((item) => (
+                <label key={item.key} className="playlist-item">
+                  <input
+                    type="checkbox"
+                    checked={playlistDraft.selectedKeys.includes(item.key)}
+                    onChange={() => togglePlaylistItem(item.key)}
+                  />
+                  <img src={item.thumbnail} alt="" loading="lazy" />
+                  <span>
+                    {item.title} - {item.duration}
+                  </span>
+                </label>
+              ))}
+            </div>
+          </section>
+        )}
+
         <section className="summary">
           <div>
             <span>Queued</span>
@@ -342,6 +579,10 @@ function App() {
           <div>
             <span>Active</span>
             <strong>{downloadCount}</strong>
+          </div>
+          <div>
+            <span>Completed</span>
+            <strong>{completedCount}</strong>
           </div>
           <div>
             <span>Total</span>
@@ -370,6 +611,24 @@ function App() {
                   <span>{item.percent.toFixed(2)}%</span>
                   <span>Speed: {item.speed}</span>
                   <span>ETA: {item.eta}</span>
+                </div>
+                <div className="item-actions">
+                  {(item.status === "paused" || item.status === "stopped" || item.status === "failed") && (
+                    <button type="button" onClick={() => resumeItem(item.id)} disabled={processing}>
+                      Resume
+                    </button>
+                  )}
+                  {(item.status === "queued" || item.status === "starting" || item.status === "downloading") && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void stopItem(item);
+                      }}
+                      disabled={item.status === "starting" || activeDownloadId === item.id ? false : processing}
+                    >
+                      Stop
+                    </button>
+                  )}
                 </div>
                 {item.filePath && <small className="path">{item.filePath}</small>}
                 {item.error && <small className="error">{item.error}</small>}
