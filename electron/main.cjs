@@ -214,17 +214,34 @@ function isPlaylistUrl(url) {
 }
 
 function parseYtDlpProgress(line) {
-  const match = line.match(/^download:([^|]+)\|([^|]+)\|(.+)$/);
-  if (!match) {
+  const clean = line.replace(/\x1B\[[0-9;]*[A-Za-z]/g, "").trim();
+  if (!clean) {
     return null;
   }
-  const rawPercent = match[1].trim().replace("%", "").trim();
-  const percent = Number(rawPercent);
-  return {
-    percent: Number.isFinite(percent) ? Number(percent.toFixed(2)) : 0,
-    speed: match[2].trim(),
-    eta: match[3].trim(),
-  };
+
+  const templateMatch = clean.match(/^download:\s*([^|]+)\|([^|]+)\|(.+)$/i);
+  if (templateMatch) {
+    const rawPercent = templateMatch[1].trim().replace("%", "").trim();
+    const percent = Number(rawPercent);
+    return {
+      percent: Number.isFinite(percent) ? Number(percent.toFixed(2)) : 0,
+      speed: templateMatch[2].trim(),
+      eta: templateMatch[3].trim(),
+    };
+  }
+
+  const defaultMatch = clean.match(
+    /\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+.+?\s+at\s+(.+?)\s+ETA\s+(.+)$/i
+  );
+  if (defaultMatch) {
+    return {
+      percent: Number(Number(defaultMatch[1]).toFixed(2)),
+      speed: defaultMatch[2].trim(),
+      eta: defaultMatch[3].trim(),
+    };
+  }
+
+  return null;
 }
 
 async function runYtDlpJson(args) {
@@ -376,8 +393,8 @@ async function downloadWithYtDlp({
     activeYtDlpDownloads.set(id, proc);
 
     let stderr = "";
-    proc.stdout.on("data", (chunk) => {
-      const lines = chunk.toString().split(/\r?\n/);
+    const handleProgressOutput = (chunk) => {
+      const lines = chunk.toString().split(/[\r\n]+/);
       for (const line of lines) {
         const parsed = parseYtDlpProgress(line.trim());
         if (!parsed) {
@@ -393,9 +410,12 @@ async function downloadWithYtDlp({
         });
         setProgress(parsed.percent);
       }
-    });
+    };
+
+    proc.stdout.on("data", handleProgressOutput);
 
     proc.stderr.on("data", (chunk) => {
+      handleProgressOutput(chunk);
       stderr += chunk.toString();
     });
 
