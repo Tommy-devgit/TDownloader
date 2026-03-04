@@ -45,6 +45,15 @@ function formatResolution(value: DownloadResolution): string {
   return value === "best" ? "Best Available" : `${value}p`;
 }
 
+function isPlaylistUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return Boolean(parsed.searchParams.get("list"));
+  } catch {
+    return false;
+  }
+}
+
 function App() {
   const [url, setUrl] = useState("");
   const [outputDir, setOutputDir] = useState("");
@@ -110,6 +119,37 @@ function App() {
     }
 
     try {
+      const queuedResolution: DownloadResolution = format === "mp3" ? "best" : resolution;
+
+      if (isPlaylistUrl(trimmed)) {
+        setStatus("Fetching playlist info...");
+        const playlist = await window.electronAPI.getPlaylistInfo(trimmed);
+        const timestamp = Date.now();
+        const newItems: QueueItem[] = playlist.items.map((item, index) => ({
+          id: `${item.id}-${timestamp}-${index}`,
+          videoId: item.id,
+          url: item.url,
+          title: item.title,
+          author: item.author,
+          duration: item.duration,
+          thumbnail: item.thumbnail,
+          format,
+          resolution: queuedResolution,
+          status: "queued",
+          percent: 0,
+          speed: "-",
+          eta: "-",
+        }));
+
+        setQueue((prev) => [...newItems, ...prev]);
+        setSupportedResolutions(RESOLUTION_OPTIONS);
+        setUrl("");
+        setStatus(
+          `Added ${newItems.length} item(s) from "${playlist.title}" to queue.`
+        );
+        return;
+      }
+
       setStatus("Fetching video info...");
       const info = await window.electronAPI.getVideoInfo(trimmed);
       const available = info.resolutions
@@ -122,9 +162,6 @@ function App() {
       }
 
       const itemId = `${info.id}-${Date.now()}`;
-      const queuedResolution: DownloadResolution =
-        format === "mp3" ? "best" : resolution;
-
       const newItem: QueueItem = {
         id: itemId,
         videoId: info.id,
@@ -240,7 +277,7 @@ function App() {
             <input
               id="url"
               type="text"
-              placeholder="https://www.youtube.com/watch?v=..."
+              placeholder="https://www.youtube.com/watch?v=... or playlist URL"
               value={url}
               onChange={(event) => setUrl(event.target.value)}
               disabled={processing}
@@ -348,4 +385,3 @@ function App() {
 }
 
 export default App;
-

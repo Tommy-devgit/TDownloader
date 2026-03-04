@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("electronAPI", {
   chooseOutputFolder: () => ipcRenderer.invoke("dialog:chooseOutputFolder"),
   getVideoInfo: (url) => ipcRenderer.invoke("video:getInfo", url),
+  getPlaylistInfo: (url) => ipcRenderer.invoke("playlist:getInfo", url),
   downloadVideo: (payload) => ipcRenderer.invoke("download:start", payload),
   minimizeWindow: () => ipcRenderer.invoke("window:minimize"),
   toggleMaximizeWindow: () => ipcRenderer.invoke("window:toggleMaximize"),

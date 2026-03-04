@@ -14,7 +14,7 @@ body {
 
 .app-shell {
   min-height: 100vh;
-  padding: 22px;
+  padding: 0 22px 22px;
 }
 
 .panel {
@@ -45,6 +45,9 @@ body {
   background: #0f1823;
   border-radius: 12px;
   padding: 8px 10px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
 }
 
 .window-title {

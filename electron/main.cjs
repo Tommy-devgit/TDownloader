@@ -197,6 +197,20 @@ function formatDuration(secondsText) {
   return hours > 0 ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
+function extractPlaylistId(url) {
+  try {
+    const parsed = new URL(url);
+    const list = parsed.searchParams.get("list");
+    return list && list.trim() ? list.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPlaylistUrl(url) {
+  return Boolean(extractPlaylistId(url));
+}
+
 function parseYtDlpProgress(line) {
   const match = line.match(/^download:([^|]+)\|([^|]+)\|(.+)$/);
   if (!match) {
@@ -208,6 +222,82 @@ function parseYtDlpProgress(line) {
     percent: Number.isFinite(percent) ? Number(percent.toFixed(2)) : 0,
     speed: match[2].trim(),
     eta: match[3].trim(),
+  };
+}
+
+async function runYtDlpJson(args) {
+  const ytdlpPath = resolveExecutable("yt-dlp.exe");
+  return await new Promise((resolve, reject) => {
+    const proc = spawn(ytdlpPath, args, {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on("error", (err) => {
+      reject(new Error(`Failed to start yt-dlp: ${err.message}`));
+    });
+
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `yt-dlp exited with code ${code}`));
+        return;
+      }
+
+      const parsed = JSON.parse(stdout);
+      resolve(parsed);
+    });
+  });
+}
+
+async function getPlaylistInfo(url) {
+  const data = await runYtDlpJson([
+    "--skip-download",
+    "--flat-playlist",
+    "--dump-single-json",
+    "--no-warnings",
+    url,
+  ]);
+
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  const items = entries
+    .filter((entry) => entry && typeof entry.id === "string")
+    .map((entry) => {
+      const videoId = entry.id;
+      const duration = formatDuration(entry.duration);
+      const title = entry.title || `Video ${videoId}`;
+      const uploader = entry.uploader || entry.channel || "Unknown";
+      const thumbnail =
+        entry.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+      return {
+        id: videoId,
+        title,
+        author: uploader,
+        duration,
+        thumbnail,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        resolutions: [],
+      };
+    });
+
+  const playlistId = extractPlaylistId(url) || data.id || "playlist";
+  const playlistTitle = data.title || `Playlist ${playlistId}`;
+
+  return {
+    id: playlistId,
+    title: playlistTitle,
+    itemCount: items.length,
+    items,
   };
 }
 
@@ -555,12 +645,40 @@ ipcMain.handle("video:getInfo", async (_, url) => {
   };
 });
 
+ipcMain.handle("playlist:getInfo", async (_, url) => {
+  if (!url || typeof url !== "string" || !isPlaylistUrl(url)) {
+    throw new Error("Enter a valid YouTube playlist URL.");
+  }
+
+  try {
+    const playlist = await getPlaylistInfo(url.trim());
+    if (playlist.items.length === 0) {
+      throw new Error("No downloadable videos found in this playlist.");
+    }
+    return playlist;
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Could not fetch playlist info.";
+    if (message.includes("yt-dlp")) {
+      throw new Error(
+        "Playlist fetching requires yt-dlp. Install yt-dlp and try again."
+      );
+    }
+    throw error;
+  }
+});
+
 ipcMain.handle("download:start", async (event, payload) => {
   const { id, url, outputDir, format, title, resolution } = payload || {};
   if (!id || typeof id !== "string") {
     throw new Error("Download ID is required.");
   }
-  if (!url || typeof url !== "string" || !ytdl.validateURL(url)) {
+  if (!url || typeof url !== "string") {
+    throw new Error("A valid YouTube URL is required.");
+  }
+  if (!ytdl.validateURL(url) && !isPlaylistUrl(url)) {
     throw new Error("A valid YouTube URL is required.");
   }
 
@@ -636,4 +754,3 @@ app.on("window-all-closed", () => {
     app.quit();
   }
 });
-

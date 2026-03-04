@@ -19,6 +19,13 @@ interface VideoInfo {
   resolutions: string[];
 }
 
+interface PlaylistInfo {
+  id: string;
+  title: string;
+  itemCount: number;
+  items: VideoInfo[];
+}
+
 interface DownloadPayload {
   id: string;
   url: string;
@@ -38,6 +45,7 @@ interface DownloadResult {
 interface ElectronAPI {
   chooseOutputFolder: () => Promise<string | null>;
   getVideoInfo: (url: string) => Promise<VideoInfo>;
+  getPlaylistInfo: (url: string) => Promise<PlaylistInfo>;
   downloadVideo: (payload: DownloadPayload) => Promise<DownloadResult>;
   minimizeWindow: () => Promise<void>;
   toggleMaximizeWindow: () => Promise<boolean>;
