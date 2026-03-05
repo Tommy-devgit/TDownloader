@@ -426,13 +426,13 @@ function App() {
           <span className="window-title">TDownloader</span>
           <div className="window-controls no-drag">
             <button type="button" onClick={() => window.electronAPI.minimizeWindow()}>
-              -
+              <span aria-hidden>—</span>
             </button>
             <button type="button" onClick={() => window.electronAPI.toggleMaximizeWindow()}>
-              {isMaximized ? "[] " : "[ ]"}
+              <span aria-hidden>{isMaximized ? "❐" : "□"}</span>
             </button>
             <button type="button" className="danger" onClick={() => window.electronAPI.closeWindow()}>
-              X
+              <span aria-hidden>✕</span>
             </button>
           </div>
         </header>
@@ -630,7 +630,18 @@ function App() {
                     </button>
                   )}
                 </div>
-                {item.filePath && <small className="path">{item.filePath}</small>}
+                {item.filePath && (
+                  <div className="file-row">
+                    <small className="path">{item.filePath}</small>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => window.electronAPI.showItemInFolder(item.filePath!)}
+                    >
+                      Show in Folder
+                    </button>
+                  </div>
+                )}
                 {item.error && <small className="error">{item.error}</small>}
               </div>
             </article>

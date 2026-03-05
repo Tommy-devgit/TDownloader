@@ -48,6 +48,7 @@ interface ElectronAPI {
   getPlaylistInfo: (url: string) => Promise<PlaylistInfo>;
   downloadVideo: (payload: DownloadPayload) => Promise<DownloadResult>;
   cancelDownload: (id: string) => Promise<boolean>;
+  showItemInFolder: (filePath: string) => Promise<void>;
   minimizeWindow: () => Promise<void>;
   toggleMaximizeWindow: () => Promise<boolean>;
   closeWindow: () => Promise<void>;

@@ -3,6 +3,7 @@ const {
   BrowserWindow,
   dialog,
   ipcMain,
+  shell,
   Tray,
   Menu,
   nativeImage,
@@ -38,27 +39,32 @@ function getIconPath() {
 function resolveExecutable(name) {
   const pathEntries = (process.env.PATH || "").split(path.delimiter);
   const home = os.homedir();
-  const ffmpegRoot = path.join(
-    home,
-    "AppData",
-    "Local",
-    "Microsoft",
-    "WinGet",
-    "Packages",
-    "yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
-  );
-  const ytdlpRoot = path.join(
-    home,
-    "AppData",
-    "Local",
-    "Microsoft",
-    "WinGet",
-    "Packages",
-    "yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe"
-  );
+  const isWindows = process.platform === "win32";
+  const ffmpegRoot = isWindows
+    ? path.join(
+        home,
+        "AppData",
+        "Local",
+        "Microsoft",
+        "WinGet",
+        "Packages",
+        "yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+      )
+    : null;
+  const ytdlpRoot = isWindows
+    ? path.join(
+        home,
+        "AppData",
+        "Local",
+        "Microsoft",
+        "WinGet",
+        "Packages",
+        "yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe"
+      )
+    : null;
 
   let ffmpegBin = null;
-  if (fs.existsSync(ffmpegRoot)) {
+  if (ffmpegRoot && fs.existsSync(ffmpegRoot)) {
     const entries = fs.readdirSync(ffmpegRoot, { withFileTypes: true });
     const versionDir = entries.find((entry) => entry.isDirectory());
     if (versionDir) {
@@ -67,9 +73,12 @@ function resolveExecutable(name) {
   }
 
   const fallbackDirs = [
-    path.join(home, "AppData", "Local", "Programs", "TDownloaderTools"),
+    isWindows ? path.join(home, "AppData", "Local", "Programs", "TDownloaderTools") : null,
     ffmpegBin,
     ytdlpRoot,
+    "/usr/local/bin",
+    "/usr/bin",
+    "/opt/homebrew/bin",
   ];
 
   const candidates = [...pathEntries, ...fallbackDirs].filter(Boolean);
@@ -241,11 +250,22 @@ function parseYtDlpProgress(line) {
     };
   }
 
+  const percentOnly = clean.match(/(\d+(?:\.\d+)?)%/);
+  if (percentOnly) {
+    const speedMatch = clean.match(/\bat\s+(.+?)\s+ETA\b/i);
+    const etaMatch = clean.match(/\bETA\s+(.+)$/i);
+    return {
+      percent: Number(Number(percentOnly[1]).toFixed(2)),
+      speed: speedMatch ? speedMatch[1].trim() : "-",
+      eta: etaMatch ? etaMatch[1].trim() : "-",
+    };
+  }
+
   return null;
 }
 
 async function runYtDlpJson(args) {
-  const ytdlpPath = resolveExecutable("yt-dlp.exe");
+  const ytdlpPath = resolveExecutable(process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
   return await new Promise((resolve, reject) => {
     const proc = spawn(ytdlpPath, args, {
       windowsHide: true,
@@ -375,8 +395,8 @@ async function downloadWithYtDlp({
   outputPath,
   outputDir,
 }) {
-  const ytdlpPath = resolveExecutable("yt-dlp.exe");
-  const ffmpegPath = resolveExecutable("ffmpeg.exe");
+  const ytdlpPath = resolveExecutable(process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+  const ffmpegPath = resolveExecutable(process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
   const args = buildYtdlpArgs({
     url,
     format,
@@ -468,6 +488,20 @@ ipcMain.handle("download:cancel", async (_, id) => {
   userStoppedDownloads.add(id);
   proc.kill("SIGTERM");
   return true;
+});
+
+ipcMain.handle("file:showInFolder", async (_, filePath) => {
+  if (!filePath || typeof filePath !== "string") {
+    return;
+  }
+  if (fs.existsSync(filePath)) {
+    shell.showItemInFolder(filePath);
+    return;
+  }
+  const folderPath = path.dirname(filePath);
+  if (fs.existsSync(folderPath)) {
+    await shell.openPath(folderPath);
+  }
 });
 
 ipcMain.handle("window:minimize", () => {
