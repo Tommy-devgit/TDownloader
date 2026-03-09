@@ -12,13 +12,18 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
-const ytdl = require("ytdl-core");
 
 const isDev = !app.isPackaged;
 let mainWindow = null;
 let tray = null;
 const activeYtDlpDownloads = new Map();
 const userStoppedDownloads = new Set();
+const COOKIE_BROWSERS =
+  process.platform === "win32"
+    ? ["edge", "chrome", "brave", "firefox"]
+    : process.platform === "darwin"
+      ? ["chrome", "edge", "brave", "firefox", "safari"]
+      : ["chrome", "edge", "brave", "firefox"];
 
 function findFirstExisting(paths) {
   for (const filePath of paths) {
@@ -222,6 +227,22 @@ function isPlaylistUrl(url) {
   return Boolean(extractPlaylistId(url));
 }
 
+function isLikelyYouTubeUrl(value) {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === "youtube.com" ||
+      host === "www.youtube.com" ||
+      host === "m.youtube.com" ||
+      host === "music.youtube.com" ||
+      host === "youtu.be"
+    );
+  } catch {
+    return false;
+  }
+}
+
 function parseYtDlpProgress(line) {
   const clean = line.replace(/\x1B\[[0-9;]*[A-Za-z]/g, "").trim();
   if (!clean) {
@@ -264,8 +285,23 @@ function parseYtDlpProgress(line) {
   return null;
 }
 
-async function runYtDlpJson(args) {
-  const ytdlpPath = resolveExecutable(process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+function isBotCheckError(message) {
+  if (!message || typeof message !== "string") {
+    return false;
+  }
+  return /sign in to confirm you.?re not a bot/i.test(message);
+}
+
+function withCookiesFromBrowser(args, browser) {
+  if (!Array.isArray(args) || args.length === 0) {
+    return args;
+  }
+  const finalArg = args[args.length - 1];
+  const base = args.slice(0, -1);
+  return [...base, "--cookies-from-browser", browser, finalArg];
+}
+
+async function runYtDlpJsonOnce(args, ytdlpPath) {
   return await new Promise((resolve, reject) => {
     const proc = spawn(ytdlpPath, args, {
       windowsHide: true,
@@ -293,10 +329,48 @@ async function runYtDlpJson(args) {
         return;
       }
 
-      const parsed = JSON.parse(stdout);
-      resolve(parsed);
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve(parsed);
+      } catch (error) {
+        reject(
+          new Error(
+            `Could not parse yt-dlp output: ${
+              error instanceof Error ? error.message : "Invalid JSON"
+            }`
+          )
+        );
+      }
     });
   });
+}
+
+async function runYtDlpJson(args) {
+  const ytdlpPath = resolveExecutable(process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+  try {
+    return await runYtDlpJsonOnce(args, ytdlpPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isBotCheckError(message)) {
+      throw error;
+    }
+  }
+
+  let lastError = new Error("yt-dlp cookie retry failed.");
+  for (const browser of COOKIE_BROWSERS) {
+    try {
+      return await runYtDlpJsonOnce(withCookiesFromBrowser(args, browser), ytdlpPath);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  if (isBotCheckError(lastError.message)) {
+    throw new Error(
+      "YouTube blocked this request. Sign in to YouTube in Edge or Chrome, close the browser, and retry."
+    );
+  }
+  throw lastError;
 }
 
 async function getPlaylistInfo(url) {
@@ -421,26 +495,7 @@ function buildYtdlpArgs({ url, format, resolution, outputPath, ffmpegPath }) {
   ];
 }
 
-async function downloadWithYtDlp({
-  sender,
-  id,
-  title,
-  url,
-  format,
-  resolution,
-  outputPath,
-  outputDir,
-}) {
-  const ytdlpPath = resolveExecutable(process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
-  const ffmpegPath = resolveExecutable(process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
-  const args = buildYtdlpArgs({
-    url,
-    format,
-    resolution,
-    outputPath,
-    ffmpegPath,
-  });
-
+async function runYtDlpDownloadOnce({ sender, id, title, args, ytdlpPath }) {
   await new Promise((resolve, reject) => {
     const proc = spawn(ytdlpPath, args, {
       windowsHide: true,
@@ -493,6 +548,70 @@ async function downloadWithYtDlp({
       reject(new Error(stderr.trim() || `yt-dlp exited with code ${code}`));
     });
   });
+}
+
+async function downloadWithYtDlp({
+  sender,
+  id,
+  title,
+  url,
+  format,
+  resolution,
+  outputPath,
+  outputDir,
+}) {
+  const ytdlpPath = resolveExecutable(process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+  const ffmpegPath = resolveExecutable(process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
+  const args = buildYtdlpArgs({
+    url,
+    format,
+    resolution,
+    outputPath,
+    ffmpegPath,
+  });
+  try {
+    await runYtDlpDownloadOnce({
+      sender,
+      id,
+      title,
+      args,
+      ytdlpPath,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isBotCheckError(message)) {
+      throw error;
+    }
+
+    let recovered = false;
+    let lastError = error;
+    for (const browser of COOKIE_BROWSERS) {
+      try {
+        const cookieArgs = withCookiesFromBrowser(args, browser);
+        await runYtDlpDownloadOnce({
+          sender,
+          id,
+          title,
+          args: cookieArgs,
+          ytdlpPath,
+        });
+        recovered = true;
+        break;
+      } catch (retryError) {
+        lastError = retryError;
+      }
+    }
+
+    if (!recovered) {
+      const retryMessage = lastError instanceof Error ? lastError.message : message;
+      if (isBotCheckError(retryMessage)) {
+        throw new Error(
+          "YouTube blocked this request. Sign in to YouTube in Edge or Chrome, close the browser, and retry."
+        );
+      }
+      throw lastError;
+    }
+  }
 
   setProgress();
   sendProgress(sender, {
@@ -582,7 +701,7 @@ ipcMain.handle("dialog:chooseOutputFolder", async () => {
 });
 
 ipcMain.handle("video:getInfo", async (_, url) => {
-  if (!url || typeof url !== "string" || !ytdl.validateURL(url)) {
+  if (!url || typeof url !== "string" || !isLikelyYouTubeUrl(url) || isPlaylistUrl(url)) {
     throw new Error("Enter a valid YouTube URL.");
   }
 
@@ -634,7 +753,7 @@ ipcMain.handle("download:start", async (event, payload) => {
   if (!url || typeof url !== "string") {
     throw new Error("A valid YouTube URL is required.");
   }
-  if (!ytdl.validateURL(url) && !isPlaylistUrl(url)) {
+  if (!isLikelyYouTubeUrl(url)) {
     throw new Error("A valid YouTube URL is required.");
   }
 
