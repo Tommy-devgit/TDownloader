@@ -29,6 +29,26 @@ npm run dist:win
 
 Builder config is in `electron-builder.json`.
 
+## Build Installers By Platform
+
+Run these on the matching OS:
+
+```bash
+npm run dist:win   # Windows -> NSIS .exe
+npm run dist:mac   # macOS -> .dmg and .zip
+npm run dist:linux # Linux -> AppImage and .deb
+```
+
+Or run all configured targets for the current host OS:
+
+```bash
+npm run dist
+```
+
+Output files are written to the `release/` directory.
+
+If a rebuild fails with `app.asar` locked, close running Electron/TDownloader processes and retry.
+
 ## App Icon Setup
 
 - Place your PNG icon at `assets/icon.png`

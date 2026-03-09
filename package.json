@@ -2,6 +2,8 @@
   "name": "tdownloader",
   "private": true,
   "version": "0.1.0",
+  "description": "Electron desktop app for downloading YouTube videos and audio.",
+  "author": "tomas",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
