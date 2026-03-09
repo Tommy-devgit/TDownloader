@@ -340,6 +340,42 @@ async function getPlaylistInfo(url) {
   };
 }
 
+async function getVideoInfo(url) {
+  const data = await runYtDlpJson([
+    "--skip-download",
+    "--dump-single-json",
+    "--no-warnings",
+    "--no-playlist",
+    url,
+  ]);
+
+  const formats = Array.isArray(data.formats) ? data.formats : [];
+  const resolutions = Array.from(
+    new Set(
+      formats
+        .filter((format) => format && format.vcodec && format.vcodec !== "none" && format.height)
+        .map((format) => Number(format.height))
+        .filter((height) => Number.isFinite(height))
+    )
+  )
+    .sort((a, b) => b - a)
+    .map((height) => String(height));
+
+  const thumbs = Array.isArray(data.thumbnails) ? data.thumbnails : [];
+  const lastThumb = thumbs.length > 0 ? thumbs[thumbs.length - 1] : null;
+  const thumbnail = data.thumbnail || lastThumb?.url || "";
+
+  return {
+    id: data.id || "",
+    title: data.title || "Unknown title",
+    author: data.uploader || data.channel || "Unknown",
+    duration: formatDuration(data.duration),
+    thumbnail,
+    url: data.webpage_url || url,
+    resolutions,
+  };
+}
+
 function buildYtdlpArgs({ url, format, resolution, outputPath, ffmpegPath }) {
   if (format === "mp3") {
     return [
@@ -550,33 +586,19 @@ ipcMain.handle("video:getInfo", async (_, url) => {
     throw new Error("Enter a valid YouTube URL.");
   }
 
-  const info = await ytdl.getBasicInfo(url.trim());
-  const details = info.videoDetails;
-  const thumb =
-    details.thumbnails && details.thumbnails.length > 0
-      ? details.thumbnails[details.thumbnails.length - 1].url
-      : "";
-  const resolutions = Array.from(
-    new Set(
-      info.formats
-        .filter((f) => f.hasVideo && f.hasAudio && f.height)
-        .map((f) => String(f.height))
-    )
-  )
-    .map((v) => Number(v))
-    .filter((v) => Number.isFinite(v))
-    .sort((a, b) => b - a)
-    .map((v) => String(v));
-
-  return {
-    id: details.videoId,
-    title: details.title,
-    author: details.author?.name || "Unknown",
-    duration: formatDuration(details.lengthSeconds),
-    thumbnail: thumb,
-    url: details.video_url || url,
-    resolutions,
-  };
+  try {
+    const video = await getVideoInfo(url.trim());
+    if (!video.id) {
+      throw new Error("Could not read video details.");
+    }
+    return video;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not fetch video info.";
+    if (message.includes("yt-dlp")) {
+      throw new Error("Video info fetching requires yt-dlp. Install yt-dlp and try again.");
+    }
+    throw error;
+  }
 });
 
 ipcMain.handle("playlist:getInfo", async (_, url) => {
